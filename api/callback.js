@@ -76,7 +76,7 @@ export default async function handler(req, res) {
         geoInfo = {};
       }
     } catch (e) {
-      console.error("IP Geolocation fetch failed:", e);
+      console.error(" fetch failed:", e);
       geoInfo = {};
     }
 
