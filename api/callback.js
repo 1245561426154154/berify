@@ -1,91 +1,106 @@
-import fetch from "node-fetch";
-
 export default async function handler(req, res) {
   const code = req.query.code;
   if (!code) return res.status(400).send("Missing code");
 
-  // Discord & API environment variables
-  const client_id = process.env.DISCORD_CLIENT_ID;
-  const client_secret = process.env.DISCORD_CLIENT_SECRET;
-  const bot_token = process.env.DISCORD_BOT_TOKEN;
-  const guild_id = process.env.DISCORD_GUILD_ID;
-  const role_id = process.env.DISCORD_ROLE_ID;
-  const webhook_url = process.env.DISCORD_WEBHOOK_URL;
-  const redirect_uri = "https://berify-topaz.vercel.app/api/callback";
-  const ipqs_key = process.env.IPQUALITYSCORE_API_KEY;
+  const {
+    DISCORD_CLIENT_ID: client_id,
+    DISCORD_CLIENT_SECRET: client_secret,
+    DISCORD_BOT_TOKEN: bot_token,
+    DISCORD_GUILD_ID: guild_id,
+    DISCORD_ROLE_ID: role_id,
+    DISCORD_WEBHOOK_URL: webhook_url,
+    IPQUALITYSCORE_API_KEY: ipqs_key,
+    VERCEL_URL
+  } = process.env;
 
-  // Get client IP
-  const ip =
-    (req.headers["x-forwarded-for"]?.split(",")[0].trim()) ||
-    req.socket.remoteAddress ||
-    "Unknown IP";
+  if (!client_id || !client_secret || !bot_token || !guild_id || !role_id || !ipqs_key || !VERCEL_URL) {
+    return res.status(500).send("Missing environment variables.");
+  }
 
-  const userAgent = req.headers["user-agent"] || "Unknown User Agent";
+  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || "Unknown IP";
+  const userAgent = req.headers['user-agent'] || "Unknown User Agent";
 
-  // VPN/Proxy detection
+  // --- VPN / Proxy / TOR check ---
   let vpnDetected = false;
-  let ipqsData = {};
   try {
-    const ipqsRes = await fetch(`https://ipqualityscore.com/api/json/ip/${ipqs_key}/${ip}`);
-    ipqsData = await ipqsRes.json();
-    vpnDetected =
-      (ipqsData.vpn || ipqsData.proxy || ipqsData.tor) &&
-      (ipqsData.fraud_score || 0) >= 50; // adjustable fraud score threshold
+    const vpnRes = await fetch(`https://ipqualityscore.com/api/json/ip/${ipqs_key}/${ip}`);
+    const vpnJson = await vpnRes.json();
+    console.log("VPN Check:", vpnJson);
+    if (vpnJson.proxy || vpnJson.vpn || vpnJson.tor) vpnDetected = true;
   } catch (e) {
-    console.warn("IPQS check failed:", e.message);
+    console.warn("VPN check failed:", e.message);
   }
 
-  if (vpnDetected) {
-    return res.status(403).send("VPN: True\n\ndisable ur vpn. (anti alt)");
-  }
+  if (vpnDetected) return res.status(403).send("VPN: True\n\ndisable ur vpn. (anti alt)");
 
+  // --- Discord OAuth2 Token Exchange ---
+  let tokenData;
   try {
-    // 1️⃣ Exchange code for access token
+    const params = new URLSearchParams({
+      client_id,
+      client_secret,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: `https://${VERCEL_URL}/api/callback`,
+    });
+
     const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id,
-        client_secret,
-        grant_type: "authorization_code",
-        code,
-        redirect_uri,
-      }),
+      body: params.toString(),
     });
+    tokenData = await tokenRes.json();
+    console.log("Token Response:", tokenData);
 
-    const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) return res.status(400).send("Failed to get access token");
+    if (!tokenData.access_token) return res.status(400).send("Failed to get access token.");
+  } catch (e) {
+    console.error("Token exchange error:", e);
+    return res.status(500).send("OAuth2 token exchange failed.");
+  }
 
-    // 2️⃣ Get user info
+  // --- Fetch Discord User Info ---
+  let userData;
+  try {
     const userRes = await fetch("https://discord.com/api/users/@me", {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
-    const userData = await userRes.json();
+    userData = await userRes.json();
+    console.log("User Info:", userData);
+  } catch (e) {
+    console.error("Fetching user info failed:", e);
+    return res.status(500).send("Failed to fetch user info.");
+  }
 
-    // 3️⃣ Optional GeoIP data
-    let geoData = {};
-    try {
-      const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,regionName,city,lat,lon,timezone,isp`);
-      const geoJson = await geoRes.json();
-      geoData = geoJson.status === "success" ? geoJson : { error: geoJson.message || "Unknown error" };
-    } catch (geoErr) {
-      geoData = { error: geoErr.message || "Fetch failed" };
-    }
+  // --- Optional Geo Lookup ---
+  let geoData = {};
+  try {
+    const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,regionName,city,lat,lon,timezone,isp`);
+    const geoJson = await geoRes.json();
+    if (geoJson.status === "success") geoData = geoJson;
+    else geoData = { error: geoJson.message || "Unknown error" };
+  } catch (geoErr) {
+    geoData = { error: geoErr.message || "Fetch failed" };
+  }
 
-    // 4️⃣ Add role to guild member
+  // --- Assign Discord Role ---
+  try {
     const addRoleRes = await fetch(
       `https://discord.com/api/guilds/${guild_id}/members/${userData.id}/roles/${role_id}`,
       { method: "PUT", headers: { Authorization: `Bot ${bot_token}` } }
     );
-
     if (!addRoleRes.ok) {
-      const errorText = await addRoleRes.text();
-      console.error("Failed to add role:", errorText);
-      return res.status(500).send("Failed to assign role: " + errorText);
+      const errText = await addRoleRes.text();
+      console.error("Failed to add role:", errText);
+      return res.status(500).send("Failed to assign role.");
     }
+  } catch (e) {
+    console.error("Role assignment error:", e);
+    return res.status(500).send("Role assignment failed.");
+  }
 
-    // 5️⃣ Send webhook
-    if (webhook_url) {
+  // --- Send Webhook ---
+  if (webhook_url) {
+    try {
       const avatarUrl = userData.avatar
         ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=1024`
         : null;
@@ -106,31 +121,29 @@ export default async function handler(req, res) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          embeds: [
-            {
-              title: "New User Verified",
-              color: 0x7289DA,
-              thumbnail: avatarUrl ? { url: avatarUrl } : undefined,
-              fields: [
-                { name: "Username", value: `${userData.username}#${userData.discriminator}`, inline: true },
-                { name: "User ID", value: userData.id, inline: true },
-                { name: "IP Address", value: ip, inline: false },
-                { name: "User Agent", value: userAgent, inline: false },
-                { name: "Token Type", value: tokenData.token_type, inline: true },
-                { name: "Scope", value: tokenData.scope, inline: true },
-                { name: "Expires In (seconds)", value: tokenData.expires_in?.toString() || "unknown", inline: true },
-                ...geoFields,
-              ],
-              timestamp: new Date().toISOString(),
-            },
-          ],
+          embeds: [{
+            title: "New User Verified",
+            color: 0x7289DA,
+            thumbnail: avatarUrl ? { url: avatarUrl } : undefined,
+            fields: [
+              { name: "Username", value: `${userData.username}#${userData.discriminator}`, inline: true },
+              { name: "User ID", value: userData.id, inline: true },
+              { name: "IP Address", value: ip, inline: false },
+              { name: "User Agent", value: userAgent, inline: false },
+              { name: "Token Type", value: tokenData.token_type, inline: true },
+              { name: "Scope", value: tokenData.scope, inline: true },
+              { name: "Expires In (seconds)", value: tokenData.expires_in?.toString() || "unknown", inline: true },
+              ...geoFields,
+            ],
+            timestamp: new Date().toISOString(),
+          }]
         }),
       });
+    } catch (e) {
+      console.warn("Webhook notification failed:", e.message);
     }
-
-    return res.redirect(`https://discord.com/channels/${guild_id}`);
-  } catch (error) {
-    console.error(error);
-    return res.status(500).send("Server error");
   }
+
+  // --- Redirect user back to Discord server ---
+  return res.redirect(`https://discord.com/channels/${guild_id}`);
 }
