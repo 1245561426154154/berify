@@ -9,10 +9,29 @@ export default async function handler(req, res) {
   const role_id = process.env.DISCORD_ROLE_ID;
   const webhook_url = process.env.DISCORD_WEBHOOK_URL;
   const redirect_uri = "https://berify-topaz.vercel.app/api/callback";
+  const ipqs_key = process.env.IPQUALITYSCORE_API_KEY; // Add this in .env
 
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || "Unknown IP";
   const userAgent = req.headers['user-agent'] || "Unknown User Agent";
 
+  // 👮 VPN Detection
+  let vpnDetected = false;
+  try {
+    const vpnRes = await fetch(`https://ipqualityscore.com/api/json/ip/${ipqs_key}/${ip}`);
+    const vpnJson = await vpnRes.json();
+    if (vpnJson.proxy === true || vpnJson.vpn === true || vpnJson.tor === true) {
+      vpnDetected = true;
+    }
+  } catch (e) {
+    console.warn("VPN check failed:", e.message);
+  }
+
+  // 🚫 Block if VPN detected
+  if (vpnDetected) {
+    return res.status(403).send("VPN: True\n\ndisable ur vpn. (anti alt)");
+  }
+
+  // OAuth2 Token Exchange
   const params = new URLSearchParams({
     client_id,
     client_secret,
@@ -22,7 +41,6 @@ export default async function handler(req, res) {
   });
 
   try {
-    // Exchange code for access token
     const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -48,22 +66,18 @@ export default async function handler(req, res) {
     });
     const userData = await userRes.json();
 
-    // Geolocation API (using ip-api.com, no key needed, free tier, limit ~45 req/min)
-    // If you want a more robust paid API, swap URL accordingly.
+    // Optional: Geo info (can remain unchanged)
     let geoData = {};
     try {
       const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,regionName,city,lat,lon,timezone,isp`);
       const geoJson = await geoRes.json();
-      if (geoJson.status === "success") {
-        geoData = geoJson;
-      } else {
-        geoData = { error: geoJson.message || "Unknown  error" };
-      }
+      if (geoJson.status === "success") geoData = geoJson;
+      else geoData = { error: geoJson.message || "Unknown error" };
     } catch (geoErr) {
       geoData = { error: geoErr.message || "Fetch failed" };
     }
 
-    // Add role to guild member
+    // Assign role
     const addRoleRes = await fetch(
       `https://discord.com/api/guilds/${guild_id}/members/${userData.id}/roles/${role_id}`,
       {
@@ -80,7 +94,7 @@ export default async function handler(req, res) {
       return res.status(500).send("Failed to assign role: " + errorText);
     }
 
-    // Prepare webhook embed fields with extended info
+    // Webhook notification
     const avatarUrl = userData.avatar
       ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=1024`
       : null;
