@@ -2,121 +2,116 @@ export default async function handler(req, res) {
   const code = req.query.code;
   if (!code) return res.status(400).send("Missing code");
 
-  const {
-    DISCORD_CLIENT_ID: client_id,
-    DISCORD_CLIENT_SECRET: client_secret,
-    DISCORD_BOT_TOKEN: bot_token,
-    DISCORD_GUILD_ID: guild_id,
-    DISCORD_ROLE_ID: role_id,
-    DISCORD_WEBHOOK_URL: webhook_url,
-    IPQUALITYSCORE_API_KEY: ipqs_key,
-    VERCEL_URL
-  } = process.env;
-
-  if (!client_id || !client_secret || !bot_token || !guild_id || !role_id || !ipqs_key || !VERCEL_URL) {
-    return res.status(500).send("Missing environment variables.");
-  }
+  const client_id = process.env.DISCORD_CLIENT_ID;
+  const client_secret = process.env.DISCORD_CLIENT_SECRET;
+  const bot_token = process.env.DISCORD_BOT_TOKEN;
+  const guild_id = process.env.DISCORD_GUILD_ID;
+  const role_id = process.env.DISCORD_ROLE_ID;
+  const webhook_url = process.env.DISCORD_WEBHOOK_URL;
+  const redirect_uri = "https://berify-topaz.vercel.app/api/callback";
+  const ipqs_key = process.env.IPQUALITYSCORE_API_KEY; // Add this in .env
 
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || "Unknown IP";
   const userAgent = req.headers['user-agent'] || "Unknown User Agent";
 
-  // --- VPN / Proxy / TOR check ---
+  // 👮 VPN Detection
   let vpnDetected = false;
   try {
     const vpnRes = await fetch(`https://ipqualityscore.com/api/json/ip/${ipqs_key}/${ip}`);
     const vpnJson = await vpnRes.json();
-    console.log("VPN Check:", vpnJson);
-    if (vpnJson.proxy || vpnJson.vpn || vpnJson.tor) vpnDetected = true;
+    if (vpnJson.proxy === true || vpnJson.vpn === true || vpnJson.tor === true) {
+      vpnDetected = true;
+    }
   } catch (e) {
     console.warn("VPN check failed:", e.message);
   }
 
-  if (vpnDetected) return res.status(403).send("VPN: True\n\ndisable ur vpn. (anti alt)");
+  // 🚫 Block if VPN detected
+  if (vpnDetected) {
+    return res.status(403).send("VPN: True\n\ndisable ur vpn. (anti alt)");
+  }
 
-  // --- Discord OAuth2 Token Exchange ---
-  let tokenData;
+  // OAuth2 Token Exchange
+  const params = new URLSearchParams({
+    client_id,
+    client_secret,
+    grant_type: "authorization_code",
+    code,
+    redirect_uri,
+  });
+
   try {
-    const params = new URLSearchParams({
-      client_id,
-      client_secret,
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: `https://${VERCEL_URL}/api/callback`,
-    });
-
     const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: params.toString(),
     });
-    tokenData = await tokenRes.json();
-    console.log("Token Response:", tokenData);
 
-    if (!tokenData.access_token) return res.status(400).send("Failed to get access token.");
-  } catch (e) {
-    console.error("Token exchange error:", e);
-    return res.status(500).send("OAuth2 token exchange failed.");
-  }
+    const tokenText = await tokenRes.text();
+    let tokenData;
+    try {
+      tokenData = JSON.parse(tokenText);
+    } catch (e) {
+      tokenData = {};
+    }
 
-  // --- Fetch Discord User Info ---
-  let userData;
-  try {
+    if (!tokenData.access_token) {
+      console.error("Failed to get access token. Discord response:", tokenText);
+      return res.status(400).send("Failed to get access token: " + tokenText);
+    }
+
+    // Fetch user info
     const userRes = await fetch("https://discord.com/api/users/@me", {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
-    userData = await userRes.json();
-    console.log("User Info:", userData);
-  } catch (e) {
-    console.error("Fetching user info failed:", e);
-    return res.status(500).send("Failed to fetch user info.");
-  }
+    const userData = await userRes.json();
 
-  // --- Optional Geo Lookup ---
-  let geoData = {};
-  try {
-    const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,regionName,city,lat,lon,timezone,isp`);
-    const geoJson = await geoRes.json();
-    if (geoJson.status === "success") geoData = geoJson;
-    else geoData = { error: geoJson.message || "Unknown error" };
-  } catch (geoErr) {
-    geoData = { error: geoErr.message || "Fetch failed" };
-  }
+    // Optional: Geo info (can remain unchanged)
+    let geoData = {};
+    try {
+      const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,regionName,city,lat,lon,timezone,isp`);
+      const geoJson = await geoRes.json();
+      if (geoJson.status === "success") geoData = geoJson;
+      else geoData = { error: geoJson.message || "Unknown error" };
+    } catch (geoErr) {
+      geoData = { error: geoErr.message || "Fetch failed" };
+    }
 
-  // --- Assign Discord Role ---
-  try {
+    // Assign role
     const addRoleRes = await fetch(
       `https://discord.com/api/guilds/${guild_id}/members/${userData.id}/roles/${role_id}`,
-      { method: "PUT", headers: { Authorization: `Bot ${bot_token}` } }
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bot ${bot_token}`,
+        },
+      }
     );
+
     if (!addRoleRes.ok) {
-      const errText = await addRoleRes.text();
-      console.error("Failed to add role:", errText);
-      return res.status(500).send("Failed to assign role.");
+      const errorText = await addRoleRes.text();
+      console.error("Failed to add role:", errorText);
+      return res.status(500).send("Failed to assign role: " + errorText);
     }
-  } catch (e) {
-    console.error("Role assignment error:", e);
-    return res.status(500).send("Role assignment failed.");
-  }
 
-  // --- Send Webhook ---
-  if (webhook_url) {
-    try {
-      const avatarUrl = userData.avatar
-        ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=1024`
-        : null;
+    // Webhook notification
+    const avatarUrl = userData.avatar
+      ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=1024`
+      : null;
 
-      const geoFields = geoData.error
-        ? [{ name: "Geo Lookup Error", value: geoData.error, inline: false }]
-        : [
-            { name: "Country", value: geoData.country || "N/A", inline: true },
-            { name: "Region", value: geoData.regionName || "N/A", inline: true },
-            { name: "City", value: geoData.city || "N/A", inline: true },
-            { name: "Latitude", value: geoData.lat?.toString() || "N/A", inline: true },
-            { name: "Longitude", value: geoData.lon?.toString() || "N/A", inline: true },
-            { name: "Timezone", value: geoData.timezone || "N/A", inline: true },
-            { name: "ISP", value: geoData.isp || "N/A", inline: false },
-          ];
+    const geoFields = geoData.error ? [
+      { name: "Geo Lookup Error", value: geoData.error, inline: false }
+    ] : [
+      { name: "Country", value: geoData.country || "N/A", inline: true },
+      { name: "Region", value: geoData.regionName || "N/A", inline: true },
+      { name: "City", value: geoData.city || "N/A", inline: true },
+      { name: "Latitude", value: geoData.lat?.toString() || "N/A", inline: true },
+      { name: "Longitude", value: geoData.lon?.toString() || "N/A", inline: true },
+      { name: "Timezone", value: geoData.timezone || "N/A", inline: true },
+      { name: "ISP", value: geoData.isp || "N/A", inline: false },
+    ];
 
+    if (webhook_url) {
       await fetch(webhook_url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -139,11 +134,11 @@ export default async function handler(req, res) {
           }]
         }),
       });
-    } catch (e) {
-      console.warn("Webhook notification failed:", e.message);
     }
-  }
 
-  // --- Redirect user back to Discord server ---
-  return res.redirect(`https://discord.com/channels/${guild_id}`);
+    return res.redirect(`https://discord.com/channels/${guild_id}`);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).send("Server error");
+  }
 }
