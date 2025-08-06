@@ -9,17 +9,21 @@ export default async function handler(req, res) {
   const role_id = process.env.DISCORD_ROLE_ID;
   const webhook_url = process.env.DISCORD_WEBHOOK_URL;
   const redirect_uri = "https://berify-topaz.vercel.app/api/callback";
-  const ipqs_key = process.env.IPQUALITYSCORE_API_KEY; // Add this in .env
+  const ipqs_key = process.env.IPQUALITYSCORE_API_KEY;
 
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || "Unknown IP";
   const userAgent = req.headers['user-agent'] || "Unknown User Agent";
 
-  // 👮 VPN Detection
+  // 👮 VPN/Tor/Proxy Detection
   let vpnDetected = false;
   try {
     const vpnRes = await fetch(`https://ipqualityscore.com/api/json/ip/${ipqs_key}/${ip}`);
     const vpnJson = await vpnRes.json();
-    if (vpnJson.proxy === true || vpnJson.vpn === true || vpnJson.tor === true) {
+
+    const riskScore = vpnJson.fraud_score ?? 0; // 0–100
+
+    // trigger if boolean flags OR riskScore > 50
+    if (vpnJson.proxy === true || vpnJson.vpn === true || vpnJson.tor === true || riskScore > 50) {
       vpnDetected = true;
     }
   } catch (e) {
@@ -66,7 +70,7 @@ export default async function handler(req, res) {
     });
     const userData = await userRes.json();
 
-    // Optional: Geo info (can remain unchanged)
+    // Optional: Geo info
     let geoData = {};
     try {
       const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,regionName,city,lat,lon,timezone,isp`);
